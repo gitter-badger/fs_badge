@@ -268,6 +268,626 @@ class SpiFlash {
     }
 }
 
+class Epaper {
+    /*
+     * class to drive Pervasive Displays epaper display
+     * see http://repaper.org
+     */
+    LINEHEADER       = null;
+
+    spi              = null;
+    epd_cs_l         = null;
+    busy             = null;
+    therm            = null;
+    pwm              = null;
+    rst_l            = null;
+    pwr_en_l         = null;
+    border           = null;
+    discharge        = null;
+    
+    epd_cs_l_write   = null;
+    spi_write        = null;
+    
+    line_data        = null;
+    scan_line_data   = null;
+    line_cache       = null;
+    line_cache_ptr   = null;
+    line_cache_slots = null;
+    line_cache_lines = null;
+    scan_table       = null;
+    
+    black_line       = null;
+    white_line       = null;
+    nothing_line     = null;
+    
+    writer           = null;
+    
+    booted           = false;
+
+    constructor(width, height, spi, epd_cs_l, busy, therm, pwm, rst_l, pwr_en_l, discharge, border) {
+        this.LINEHEADER     = format("%c%c", 0x70, 0x0A);
+        
+        epd_cs_l_write = epd_cs_l.write.bindenv(epd_cs_l);
+        spi_write      = spi.write.bindenv(spi);
+        
+        // Initialize the various caches
+        local line_data_size = (width / 8) + (height / 4) + 2;
+        line_data = blob(line_data_size);
+        line_cache = array(32);
+        for (local i = 0; i < 32; i++ ) {
+            line_cache[i] = blob(line_data_size);
+        }
+        
+        line_cache_ptr   = 0;
+        line_cache_lines = {};
+        line_cache_slots = {};
+        
+        scan_line_data = blob(BYTESPERSCAN);
+        
+        white_line = junk_line(WHITE_PIXEL, BYTESPERLINE);
+        black_line = junk_line(BLACK_PIXEL, BYTESPERLINE);
+        nothing_line = junk_line(0x00, BYTESPERLINE);
+
+        writer = line_data.writen.bindenv(line_data);
+        
+        // initialize the SPI bus
+        // this is tricky since we're likely sharing it with the SPI flash. Need to use a clock speed that both
+        // are ok with, or reconfigure the bus on every transaction
+        // As it turns out, the ePaper display is content with 4 MHz to 12 MHz, all of which are ok with the flash
+        // Furthermore, the display seems to work just fine at 15 MHz.
+        this.spi = spi;
+        //server.log("Display Running at: " + this.spiOff() + " kHz");
+        
+        this.epd_cs_l = epd_cs_l;
+        this.epd_cs_l.configure(DIGITAL_OUT);
+        //this.epd_cs_l.write(0);
+
+        // initialize the other digital i/o needed by the display
+        this.busy = busy;
+        this.busy.configure(DIGITAL_IN);
+
+        this.therm = therm;
+
+        this.rst_l = rst_l;
+        this.rst_l.configure(DIGITAL_OUT);
+        //this.rst_l.write(1);
+
+        this.pwr_en_l = pwr_en_l;
+        this.pwr_en_l.configure(DIGITAL_OUT);
+        //this.pwr_en_l.write(1);
+
+        this.discharge = discharge;
+        this.discharge.configure(DIGITAL_OUT);
+        //this.discharge.write(0);
+
+        this.border = border;
+        this.border.configure(DIGITAL_OUT);
+        //this.border.write(0);
+
+        // must call this to release the spi bus
+        this.epd_cs_l.write(1);
+    }
+
+    // enable SPI
+    function spiOn() {
+        local freq = this.spi.configure(CLOCK_IDLE_HIGH | MSB_FIRST | CLOCK_2ND_EDGE, SPICLK);
+        this.spi.write("\x00");
+        imp.sleep(0.00001);
+        //server.log("running at " + freq);
+        return freq;
+    }
+
+    // disable SPI
+    function spiOff() {
+        local freq = this.spi.configure(CLOCK_IDLE_LOW | MSB_FIRST | CLOCK_2ND_EDGE, SPICLK);
+
+        return freq;
+    }
+    
+    function itos_pair(a, b) {
+      local result = blob(2);
+      result[0] = a;
+      result[1] = b;
+      return result;
+    }
+
+    // Write to EPD registers over SPI
+    function writeEPD(index, ...) {
+        epd_cs_l_write(1);                      // CS = 1
+        epd_cs_l_write(0);                      // CS = 0
+        spi_write(itos_pair(0x70, index));
+        epd_cs_l_write(1);                      // CS = 1
+        epd_cs_l_write(0);                      // CS = 0
+        spi_write(format("%c", 0x72));          // Write data header
+        //spi_write(itos_pair(0x72, value));
+        
+        foreach (word in vargv) {
+            spi_write(format("%c", word));      // then register data
+        }
+        
+        epd_cs_l_write(1);                      // CS = 1
+    }
+    
+    function write_epd_pair(index, value) {
+        epd_cs_l_write(1);                        // CS = 1
+        epd_cs_l_write(0);                        // CS = 0
+        spi_write(itos_pair(0x70, index));
+        epd_cs_l_write(1);                        // CS = 1
+        epd_cs_l_write(0);                        // CS = 0
+        spi_write(itos_pair(0x72, value));
+        epd_cs_l_write(1);                        // CS = 1
+    }
+    
+    function writeEPD_raw(...) {
+        imp.sleep(0.00001);
+        epd_cs_l_write(0);                      // CS = 0
+
+        foreach (word in vargv) {
+            spi_write(format("%c", word));      // then register data
+        }
+        
+        epd_cs_l_write(1);                      // CS = 1
+    }
+    
+    function readEPD(...) {
+        local result = "";
+
+        imp.sleep(0.00001);
+        this.epd_cs_l.write(0);                      // CS = 0
+        
+        foreach (word in vargv) {
+            result += this.spi.writeread(format("%c", word));
+        }
+        
+        this.epd_cs_l.write(1);                      // CS = 1
+        
+        return result;
+    }
+    
+    // Power on COG Driver
+    function start() {
+        server.log("Powering On EPD.");
+
+        /* POWER-ON SEQUENCE ------------------------------------------------*/
+
+        // make sure SPI is low to avoid back-powering things through the SPI bus
+        this.spiOn();
+
+        // Make sure signals start unasserted (rest, panel-on, discharge, border, cs)
+        this.pwr_en_l.write(1);
+        this.rst_l.write(0);
+        this.discharge.write(0);
+        this.border.write(0);
+        this.epd_cs_l.write(0);
+
+        // Turn on panel power
+        this.pwr_en_l.write(0);
+        this.rst_l.write(1);
+        this.border.write(1);
+        this.epd_cs_l.write(1);
+        imp.sleep(0.005);
+        
+        // send reset pulse
+        this.rst_l.write(0);
+        imp.sleep(0.005);
+        
+        this.rst_l.write(1);
+        imp.sleep(0.005);
+        
+        // Initialize COG Driver
+        // Wait for screen to be ready
+        while (busy.read()) {
+            server.log("Waiting for COG Driver to Power On...");
+            imp.sleep(0.005);
+        }
+        
+        // Check COG ID
+        local cog_id = readEPD(0x71, 0x00)[1];
+        //server.log("Cog ID: " + cog_id);
+        if (0x02 != (0x0f & cog_id)) {
+            server.error("Invalid Display Version")
+            this.stop();
+            // TODO led error
+            return;
+        }
+        
+        // Disable OE
+        this.writeEPD(0x02, 0x40);
+        
+        // Check Breakage - TODO
+        //server.log(readEPD(0x0F,0x00));
+        
+        //Power Saving Mode
+        this.writeEPD(0x0b, 0x02);
+        
+        // Channel Select for 2.7" Display
+        this.writeEPD(0x01,0x00,0x00,0x00,0x7F,0xFF,0xFE,0x00,0x00);
+
+        // High Power Mode Oscillator Setting
+        this.writeEPD(0x07, 0xd1);
+        
+        // Power Setting
+        this.writeEPD(0x08, 0x02);
+        
+        // Set Vcom level
+        this.writeEPD(0x09, 0xc2);
+
+        // power setting
+        this.writeEPD(0x04, 0x03);
+
+        // Driver latch on ("cancel register noise")
+        this.writeEPD(0x03, 0x01);
+
+        // Driver latch off
+        this.writeEPD(0x03, 0x00);
+
+        imp.sleep(0.05);
+        
+        local dc_ok = false;
+        
+        for (local i = 0; i < 4; i++) {
+            // Start charge pump positive V (VGH & VDH on)
+            this.writeEPD(0x05, 0x01);
+
+            imp.sleep(0.240);
+
+            // Start charge pump negative voltage
+            this.writeEPD(0x05, 0x03);
+
+            imp.sleep(0.040);
+
+            // Set charge pump Vcom driver to ON
+            this.writeEPD(0x05, 0x0f);
+
+            imp.sleep(0.040);
+            
+            writeEPD_raw(0x70, 0x0f);
+            local dc_state = readEPD(0x73, 0x00)[1];
+            //server.log("dc state: " + dc_state);
+            if (0x40 == (0x40 & dc_state)) {
+                dc_ok = true;
+                break;
+            }
+        }
+        
+        if (!dc_ok) {
+            server.error("DC state failed");
+            
+            // Output enable to disable
+            this.writeEPD(0x02, 0x40);
+            
+            this.stop();
+            
+            // TODO led error blink
+            return;
+        }
+        
+        booted = true;
+
+        server.log("COG Driver Initialized.");
+    }
+
+    // Power off COG Driver
+    function stop() {
+        server.log("Powering Down EPD");
+        // delay 25ms
+        //imp.sleep(0.025);
+
+        // set BORDER low for 200 ms
+        this.border.write(0);
+        imp.sleep(0.2);
+        this.border.write(1);
+        
+        // Check DC/DC
+        //server.log("Check DC/DC on EPD Power off: (0x40)");
+        writeEPD_raw(0x70, 0x0f);
+        local dc_state = readEPD(0x73, 0x00)[1];
+        //server.log("dc state: " + dc_state);
+        if (0x40 != (0x40 & dc_state)) {ly
+            server.log("dc failed");
+            return;
+        }
+
+        // latch reset on
+        this.writeEPD(0x03, 0x01);
+
+        //output enable off
+        this.writeEPD(0x02, 0x05);
+
+        // VCOM power off
+        this.writeEPD(0x05, 0x03);
+
+        // power off negative charge pump
+        this.writeEPD(0x05, 0x01);
+        
+        imp.sleep(0.240);
+        
+        // power off all charge pumps
+        this.writeEPD(0x05, 0x00);
+        
+        // turn off oscillator
+        this.writeEPD(0x07, 0x01);
+
+        // discharge internal on
+        writeEPD(0x04, 0x83);
+
+        imp.sleep(0.030);
+
+        // turn off all power and set all inputs low
+        this.rst_l.write(0);
+        this.pwr_en_l.write(1);
+        this.border.write(0);
+
+        // ensure MOSI is low before CS Low
+        this.spiOff();
+        imp.sleep(0.001);
+        this.epd_cs_l.write(0);
+
+        // send discharge pulse
+        //server.log("Discharging Rails");
+        this.discharge.write(1);
+        imp.sleep(0.15);
+        this.discharge.write(0);
+        
+        this.epd_cs_l.write(1);
+
+        server.log("Display Powered Down.");
+    }
+    
+    function cache_line(line, data) {
+        local slot = line_cache_ptr++ % BLOCK;
+        
+        line_cache_lines[line] <- slot;
+        if (slot in line_cache_slots) {
+            local old_line = line_cache_slots[slot];
+            delete line_cache_lines[old_line];
+        }
+        line_cache_slots[slot] <- line;
+        
+        line_cache[slot].seek(0);
+        line_cache[slot].writeblob(data);
+    }
+    
+    function get_cached_line(line) {
+        if (line in line_cache_lines) {
+            return line_cache[line_cache_lines[line]];
+        } else {
+            return false;
+        }
+    }
+    
+    function clear_cache() {
+        line_cache_lines.clear();
+        line_cache_slots.clear();
+        
+        line_cache_ptr = 0;
+    }
+    
+    // draw a line on the screen
+    function write_line(line, data, inverse, cache_lines = true, set_voltage_limit = false) {
+        local pixels;
+
+        if (set_voltage_limit) {
+            // charge pump voltage level reduce voltage shift
+            write_epd_pair(0x04, 0x00);
+        }
+
+        line_data.seek(0);
+
+        if (data == BLACK_PIXEL || data == WHITE_PIXEL || data == NOTHING_PIXEL) {
+            if (data == WHITE_PIXEL) {
+                pixels = white_line;
+            } else if (data == BLACK_PIXEL) {
+                pixels = black_line;
+            } else {
+                pixels = nothing_line;
+            }
+
+            writer(0x72, BYTE);
+            
+            // Null border byte
+            writer(0x00, BYTE);
+            
+            // Odd pixels
+            line_data.writeblob(pixels);
+
+            // Scan Lines
+            local scan_pos = (HEIGHT - line - 1) >> 2;
+            local scan_shift = 0x03 << ((line & 0x03) << 1);
+
+            // Set the scan line, write the blob, then reset to 0
+            scan_line_data[scan_pos] = scan_shift;
+            line_data.writeblob(scan_line_data);
+            scan_line_data[scan_pos] = 0x00;
+            
+            // Even Pixels
+            line_data.writeblob(pixels);
+        } else {
+            local cached_line = get_cached_line(line);
+      
+            if (cached_line) {
+                line_data.writeblob(cached_line);
+            } else {
+                writer(0x72, BYTE);
+              
+                // Null border byte
+                writer(0x00, BYTE);
+              
+                // Odd pixels
+                for (local i = BYTESPERLINE - 1; i > -1; i--) {
+                    pixels = (data[i]>>1) ^ inverse | 0xaa;
+
+                    pixels = ((pixels & 0xc0) >> 6)
+                           | ((pixels & 0x30) >> 2)
+                           | ((pixels & 0x0c) << 2)
+                           | ((pixels & 0x03) << 6);
+                           
+                    writer(pixels, BYTE);
+                }
+                  
+                // Scan Lines
+                local scan_pos = (HEIGHT - line - 1) >> 2;
+                local scan_shift = 0x03 << ((line & 0x03) << 1);
+    
+                // Set the scan line, write the blob, then reset to 0
+                scan_line_data[scan_pos] = scan_shift;
+                line_data.writeblob(scan_line_data);
+                scan_line_data[scan_pos] = 0x00;
+              
+                // Even Pixels
+                for (local i = 0; i < BYTESPERLINE; i++) {
+                    pixels = data[i] ^ inverse | 0xaa;
+                    writer(pixels, BYTE);
+                }
+
+                if (cache_lines) {
+                    cache_line(line, line_data);
+                }
+            }
+        }
+        
+        // read from start of line
+        line_data.seek(0);
+    
+        // Send index "0x0A" and keep CS asserted
+        epd_cs_l_write(0);                      // CS = 0
+        spi_write(LINEHEADER);
+        epd_cs_l_write(1);                      // CS = 1
+        epd_cs_l_write(0);                      // CS = 0
+        
+        spi_write(line_data);
+        
+        epd_cs_l_write(1);
+    
+        // Turn on output enable
+        write_epd_pair(0x02, 0x07);
+    }
+
+    // draw an image
+    function draw_image(data) {
+        this.frame_data_13(data, INVERSE);
+        this.frame_stage_2();
+        this.frame_data_13(data, NORMAL);
+    }
+    
+    function draw_image_range(data, start, end) {
+        frame_data_13_range(data, INVERSE, start, end);
+        frame_stage_2_range(start, end);
+        frame_data_13_range(data, NORMAL, start, end);
+    }
+    
+    function frame_data_13_range(data, inverse, start, end) {
+        local total_lines = end - start;
+        clear_cache();
+        
+        for (local i = 0; i < REPEAT; i++) {
+            local block_begin = start;
+            local block_end   = start + BLOCK;
+            
+            if (end < block_end) {
+                block_end = end;
+            }
+            
+            data.seek(0);
+            
+            if (start > 0) {
+                write_line(start - 1, WHITE_PIXEL, NORMAL, false);
+                write_line(start - 1, WHITE_PIXEL, NORMAL, false);
+            }
+            
+            while (block_begin < end) {
+                //server.log("block begin = " + block_begin + " block_end = " + block_end);
+                for (local j = block_begin; j < block_end; j++) {
+                    data.seek((j - start) * BYTESPERLINE);
+                    write_line(j, data.readblob(BYTESPERLINE), inverse, false);
+                }
+                
+                block_begin = block_begin + STEP;
+                block_end   = block_end + STEP;
+                
+                if (block_end > end) {
+                    block_end = end;
+                }
+            }
+            
+            if (end < HEIGHT) {
+                write_line(end, WHITE_PIXEL, NORMAL, false);
+                write_line(end, WHITE_PIXEL, NORMAL, false);
+            }
+        }
+    }
+    
+    function frame_stage_2_range(start, end) {
+        clear_cache();
+        
+        for (local i = 0; i < 4; i++) {
+            frame_fixed_timed(BLACK_PIXEL, 196, start, end);
+            frame_fixed_timed(WHITE_PIXEL, 196, start, end);
+        }
+    }
+    
+    function frame_data_13(data, inverse) {
+        clear_cache();
+        
+        for (local i = 0; i < REPEAT; i++) {
+            local block_begin = 0;
+            local block_end   = BLOCK;
+            
+            data.seek(0);
+            
+            while (block_begin < HEIGHT) {
+                for (local j = block_begin; j < block_end; j++) {
+                    data.seek(j * BYTESPERLINE);
+                    write_line(j, data.readblob(BYTESPERLINE), inverse, false);
+                }
+                
+                block_begin = block_begin + STEP;
+                block_end   = block_end + STEP;
+                
+                if (block_end > HEIGHT) {
+                    block_end = HEIGHT;
+                }
+            }
+        }
+    }
+    
+    function junk_line(value, size) {
+        local junk = blob(size);
+        
+        for (local i = 0; i < size; i++) {
+            junk.writen(value, BYTE);
+        }
+        
+        return junk;
+    }
+    
+    function frame_stage_2() {
+        clear_cache();
+        
+        for (local i = 0; i < 4; i++) {
+            frame_fixed_timed(BLACK_PIXEL, 196, 0, HEIGHT);
+            frame_fixed_timed(WHITE_PIXEL, 196, 0, HEIGHT);
+        }
+    }
+    
+    function frame_fixed_timed(data, stage_time, start, end) {
+       while (stage_time > 0) {
+            local start_time = hardware.millis();
+            
+            for (local i = start; i < end; i++) {
+                write_line(i, data, NORMAL, false);
+            }
+            
+            local end_time = hardware.millis();
+            stage_time = stage_time - end_time - start_time;
+        }
+    }
+
+    function getTemp() {
+        return therm.read_c();
+    }
+}
+
 // IO Expander classes
 class SX150x{
     //Private variables
@@ -890,625 +1510,6 @@ const REPEAT         = 2;
 const STEP           = 4;
 const BLOCK          = 32;
 
-class Epaper {
-    /*
-     * class to drive Pervasive Displays epaper display
-     * see http://repaper.org
-     */
-    LINEHEADER       = null;
-
-    spi              = null;
-    epd_cs_l         = null;
-    busy             = null;
-    therm            = null;
-    pwm              = null;
-    rst_l            = null;
-    pwr_en_l         = null;
-    border           = null;
-    discharge        = null;
-    
-    epd_cs_l_write   = null;
-    spi_write        = null;
-    
-    line_data        = null;
-    scan_line_data   = null;
-    line_cache       = null;
-    line_cache_ptr   = null;
-    line_cache_slots = null;
-    line_cache_lines = null;
-    scan_table       = null;
-    
-    black_line       = null;
-    white_line       = null;
-    nothing_line     = null;
-    
-    writer           = null;
-    
-    booted           = false;
-
-    constructor(width, height, spi, epd_cs_l, busy, therm, pwm, rst_l, pwr_en_l, discharge, border) {
-        this.LINEHEADER     = format("%c%c", 0x70, 0x0A);
-        
-        epd_cs_l_write = epd_cs_l.write.bindenv(epd_cs_l);
-        spi_write      = spi.write.bindenv(spi);
-        
-        // Initialize the various caches
-        local line_data_size = (width / 8) + (height / 4) + 2;
-        line_data = blob(line_data_size);
-        line_cache = array(32);
-        for (local i = 0; i < 32; i++ ) {
-            line_cache[i] = blob(line_data_size);
-        }
-        
-        line_cache_ptr   = 0;
-        line_cache_lines = {};
-        line_cache_slots = {};
-        
-        scan_line_data = blob(BYTESPERSCAN);
-        
-        white_line = junk_line(WHITE_PIXEL, BYTESPERLINE);
-        black_line = junk_line(BLACK_PIXEL, BYTESPERLINE);
-        nothing_line = junk_line(0x00, BYTESPERLINE);
-
-        writer = line_data.writen.bindenv(line_data);
-        
-        // initialize the SPI bus
-        // this is tricky since we're likely sharing it with the SPI flash. Need to use a clock speed that both
-        // are ok with, or reconfigure the bus on every transaction
-        // As it turns out, the ePaper display is content with 4 MHz to 12 MHz, all of which are ok with the flash
-        // Furthermore, the display seems to work just fine at 15 MHz.
-        this.spi = spi;
-        //server.log("Display Running at: " + this.spiOff() + " kHz");
-        
-        this.epd_cs_l = epd_cs_l;
-        this.epd_cs_l.configure(DIGITAL_OUT);
-        //this.epd_cs_l.write(0);
-
-        // initialize the other digital i/o needed by the display
-        this.busy = busy;
-        this.busy.configure(DIGITAL_IN);
-
-        this.therm = therm;
-
-        this.rst_l = rst_l;
-        this.rst_l.configure(DIGITAL_OUT);
-        //this.rst_l.write(1);
-
-        this.pwr_en_l = pwr_en_l;
-        this.pwr_en_l.configure(DIGITAL_OUT);
-        //this.pwr_en_l.write(1);
-
-        this.discharge = discharge;
-        this.discharge.configure(DIGITAL_OUT);
-        //this.discharge.write(0);
-
-        this.border = border;
-        this.border.configure(DIGITAL_OUT);
-        //this.border.write(0);
-
-        // must call this to release the spi bus
-        this.epd_cs_l.write(1);
-    }
-
-    // enable SPI
-    function spiOn() {
-        local freq = this.spi.configure(CLOCK_IDLE_HIGH | MSB_FIRST | CLOCK_2ND_EDGE, SPICLK);
-        this.spi.write("\x00");
-        imp.sleep(0.00001);
-        //server.log("running at " + freq);
-        return freq;
-    }
-
-    // disable SPI
-    function spiOff() {
-        local freq = this.spi.configure(CLOCK_IDLE_LOW | MSB_FIRST | CLOCK_2ND_EDGE, SPICLK);
-
-        return freq;
-    }
-    
-    function itos_pair(a, b) {
-      local result = blob(2);
-      result[0] = a;
-      result[1] = b;
-      return result;
-    }
-
-    // Write to EPD registers over SPI
-    function writeEPD(index, ...) {
-        epd_cs_l_write(1);                      // CS = 1
-        epd_cs_l_write(0);                      // CS = 0
-        spi_write(itos_pair(0x70, index));
-        epd_cs_l_write(1);                      // CS = 1
-        epd_cs_l_write(0);                      // CS = 0
-        spi_write(format("%c", 0x72));          // Write data header
-        //spi_write(itos_pair(0x72, value));
-        
-        foreach (word in vargv) {
-            spi_write(format("%c", word));      // then register data
-        }
-        
-        epd_cs_l_write(1);                      // CS = 1
-    }
-    
-    function write_epd_pair(index, value) {
-        epd_cs_l_write(1);                        // CS = 1
-        epd_cs_l_write(0);                        // CS = 0
-        spi_write(itos_pair(0x70, index));
-        epd_cs_l_write(1);                        // CS = 1
-        epd_cs_l_write(0);                        // CS = 0
-        spi_write(itos_pair(0x72, value));
-        epd_cs_l_write(1);                        // CS = 1
-    }
-    
-    function writeEPD_raw(...) {
-        imp.sleep(0.00001);
-        epd_cs_l_write(0);                      // CS = 0
-
-        foreach (word in vargv) {
-            spi_write(format("%c", word));      // then register data
-        }
-        
-        epd_cs_l_write(1);                      // CS = 1
-    }
-    
-    function readEPD(...) {
-        local result = "";
-
-        imp.sleep(0.00001);
-        this.epd_cs_l.write(0);                      // CS = 0
-        
-        foreach (word in vargv) {
-            result += this.spi.writeread(format("%c", word));
-        }
-        
-        this.epd_cs_l.write(1);                      // CS = 1
-        
-        return result;
-    }
-    
-    // Power on COG Driver
-    function start() {
-        server.log("Powering On EPD.");
-
-        /* POWER-ON SEQUENCE ------------------------------------------------*/
-
-        // make sure SPI is low to avoid back-powering things through the SPI bus
-        this.spiOn();
-
-        // Make sure signals start unasserted (rest, panel-on, discharge, border, cs)
-        this.pwr_en_l.write(1);
-        this.rst_l.write(0);
-        this.discharge.write(0);
-        this.border.write(0);
-        this.epd_cs_l.write(0);
-
-        // Turn on panel power
-        this.pwr_en_l.write(0);
-        this.rst_l.write(1);
-        this.border.write(1);
-        this.epd_cs_l.write(1);
-        imp.sleep(0.005);
-        
-        // send reset pulse
-        this.rst_l.write(0);
-        imp.sleep(0.005);
-        
-        this.rst_l.write(1);
-        imp.sleep(0.005);
-        
-        // Initialize COG Driver
-        // Wait for screen to be ready
-        while (busy.read()) {
-            server.log("Waiting for COG Driver to Power On...");
-            imp.sleep(0.005);
-        }
-        
-        // Check COG ID
-        local cog_id = readEPD(0x71, 0x00)[1];
-        //server.log("Cog ID: " + cog_id);
-        if (0x02 != (0x0f & cog_id)) {
-            server.error("Invalid Display Version")
-            this.stop();
-            // TODO led error
-            return;
-        }
-        
-        // Disable OE
-        this.writeEPD(0x02, 0x40);
-        
-        // Check Breakage - TODO
-        //server.log(readEPD(0x0F,0x00));
-        
-        //Power Saving Mode
-        this.writeEPD(0x0b, 0x02);
-        
-        // Channel Select for 2.7" Display
-        this.writeEPD(0x01,0x00,0x00,0x00,0x7F,0xFF,0xFE,0x00,0x00);
-
-        // High Power Mode Oscillator Setting
-        this.writeEPD(0x07, 0xd1);
-        
-        // Power Setting
-        this.writeEPD(0x08, 0x02);
-        
-        // Set Vcom level
-        this.writeEPD(0x09, 0xc2);
-
-        // power setting
-        this.writeEPD(0x04, 0x03);
-
-        // Driver latch on ("cancel register noise")
-        this.writeEPD(0x03, 0x01);
-
-        // Driver latch off
-        this.writeEPD(0x03, 0x00);
-
-        imp.sleep(0.05);
-        
-        local dc_ok = false;
-        
-        for (local i = 0; i < 4; i++) {
-            // Start charge pump positive V (VGH & VDH on)
-            this.writeEPD(0x05, 0x01);
-
-            imp.sleep(0.240);
-
-            // Start charge pump negative voltage
-            this.writeEPD(0x05, 0x03);
-
-            imp.sleep(0.040);
-
-            // Set charge pump Vcom driver to ON
-            this.writeEPD(0x05, 0x0f);
-
-            imp.sleep(0.040);
-            
-            writeEPD_raw(0x70, 0x0f);
-            local dc_state = readEPD(0x73, 0x00)[1];
-            //server.log("dc state: " + dc_state);
-            if (0x40 == (0x40 & dc_state)) {
-                dc_ok = true;
-                break;
-            }
-        }
-        
-        if (!dc_ok) {
-            server.error("DC state failed");
-            
-            // Output enable to disable
-            this.writeEPD(0x02, 0x40);
-            
-            this.stop();
-            
-            // TODO led error blink
-            return;
-        }
-        
-        booted = true;
-
-        server.log("COG Driver Initialized.");
-    }
-
-    // Power off COG Driver
-    function stop() {
-        server.log("Powering Down EPD");
-        // delay 25ms
-        //imp.sleep(0.025);
-
-        // set BORDER low for 200 ms
-        this.border.write(0);
-        imp.sleep(0.2);
-        this.border.write(1);
-        
-        // Check DC/DC
-        //server.log("Check DC/DC on EPD Power off: (0x40)");
-        writeEPD_raw(0x70, 0x0f);
-        local dc_state = readEPD(0x73, 0x00)[1];
-        //server.log("dc state: " + dc_state);
-        if (0x40 != (0x40 & dc_state)) {ly
-            server.log("dc failed");
-            return;
-        }
-
-        // latch reset on
-        this.writeEPD(0x03, 0x01);
-
-        //output enable off
-        this.writeEPD(0x02, 0x05);
-
-        // VCOM power off
-        this.writeEPD(0x05, 0x03);
-
-        // power off negative charge pump
-        this.writeEPD(0x05, 0x01);
-        
-        imp.sleep(0.240);
-        
-        // power off all charge pumps
-        this.writeEPD(0x05, 0x00);
-        
-        // turn off oscillator
-        this.writeEPD(0x07, 0x01);
-
-        // discharge internal on
-        writeEPD(0x04, 0x83);
-
-        imp.sleep(0.030);
-
-        // turn off all power and set all inputs low
-        this.rst_l.write(0);
-        this.pwr_en_l.write(1);
-        this.border.write(0);
-
-        // ensure MOSI is low before CS Low
-        this.spiOff();
-        imp.sleep(0.001);
-        this.epd_cs_l.write(0);
-
-        // send discharge pulse
-        //server.log("Discharging Rails");
-        this.discharge.write(1);
-        imp.sleep(0.15);
-        this.discharge.write(0);
-        
-        this.epd_cs_l.write(1);
-
-        server.log("Display Powered Down.");
-    }
-    
-    function cache_line(line, data) {
-        local slot = line_cache_ptr++ % BLOCK;
-        
-        line_cache_lines[line] <- slot;
-        if (slot in line_cache_slots) {
-            local old_line = line_cache_slots[slot];
-            delete line_cache_lines[old_line];
-        }
-        line_cache_slots[slot] <- line;
-        
-        line_cache[slot].seek(0);
-        line_cache[slot].writeblob(data);
-    }
-    
-    function get_cached_line(line) {
-        if (line in line_cache_lines) {
-            return line_cache[line_cache_lines[line]];
-        } else {
-            return false;
-        }
-    }
-    
-    function clear_cache() {
-        line_cache_lines.clear();
-        line_cache_slots.clear();
-        
-        line_cache_ptr = 0;
-    }
-    
-    // draw a line on the screen
-    function write_line(line, data, inverse, cache_lines = true, set_voltage_limit = false) {
-        local pixels;
-
-        if (set_voltage_limit) {
-            // charge pump voltage level reduce voltage shift
-            write_epd_pair(0x04, 0x00);
-        }
-
-        line_data.seek(0);
-
-        if (data == BLACK_PIXEL || data == WHITE_PIXEL || data == NOTHING_PIXEL) {
-            if (data == WHITE_PIXEL) {
-                pixels = white_line;
-            } else if (data == BLACK_PIXEL) {
-                pixels = black_line;
-            } else {
-                pixels = nothing_line;
-            }
-
-            writer(0x72, BYTE);
-            
-            // Null border byte
-            writer(0x00, BYTE);
-            
-            // Odd pixels
-            line_data.writeblob(pixels);
-
-            // Scan Lines
-            local scan_pos = (HEIGHT - line - 1) >> 2;
-            local scan_shift = 0x03 << ((line & 0x03) << 1);
-
-            // Set the scan line, write the blob, then reset to 0
-            scan_line_data[scan_pos] = scan_shift;
-            line_data.writeblob(scan_line_data);
-            scan_line_data[scan_pos] = 0x00;
-            
-            // Even Pixels
-            line_data.writeblob(pixels);
-        } else {
-            local cached_line = get_cached_line(line);
-      
-            if (cached_line) {
-                line_data.writeblob(cached_line);
-            } else {
-                writer(0x72, BYTE);
-              
-                // Null border byte
-                writer(0x00, BYTE);
-              
-                // Odd pixels
-                for (local i = BYTESPERLINE - 1; i > -1; i--) {
-                    pixels = (data[i]>>1) ^ inverse | 0xaa;
-
-                    pixels = ((pixels & 0xc0) >> 6)
-                           | ((pixels & 0x30) >> 2)
-                           | ((pixels & 0x0c) << 2)
-                           | ((pixels & 0x03) << 6);
-                           
-                    writer(pixels, BYTE);
-                }
-                  
-                // Scan Lines
-                local scan_pos = (HEIGHT - line - 1) >> 2;
-                local scan_shift = 0x03 << ((line & 0x03) << 1);
-    
-                // Set the scan line, write the blob, then reset to 0
-                scan_line_data[scan_pos] = scan_shift;
-                line_data.writeblob(scan_line_data);
-                scan_line_data[scan_pos] = 0x00;
-              
-                // Even Pixels
-                for (local i = 0; i < BYTESPERLINE; i++) {
-                    pixels = data[i] ^ inverse | 0xaa;
-                    writer(pixels, BYTE);
-                }
-
-                if (cache_lines) {
-                    cache_line(line, line_data);
-                }
-            }
-        }
-        
-        // read from start of line
-        line_data.seek(0);
-    
-        // Send index "0x0A" and keep CS asserted
-        epd_cs_l_write(0);                      // CS = 0
-        spi_write(LINEHEADER);
-        epd_cs_l_write(1);                      // CS = 1
-        epd_cs_l_write(0);                      // CS = 0
-        
-        spi_write(line_data);
-        
-        epd_cs_l_write(1);
-    
-        // Turn on output enable
-        write_epd_pair(0x02, 0x07);
-    }
-
-    // draw an image
-    function draw_image(data) {
-        this.frame_data_13(data, INVERSE);
-        this.frame_stage_2();
-        this.frame_data_13(data, NORMAL);
-    }
-    
-    function draw_image_range(data, start, end) {
-        frame_data_13_range(data, INVERSE, start, end);
-        frame_stage_2_range(start, end);
-        frame_data_13_range(data, NORMAL, start, end);
-    }
-    
-    function frame_data_13_range(data, inverse, start, end) {
-        local total_lines = end - start;
-        clear_cache();
-        
-        for (local i = 0; i < REPEAT; i++) {
-            local block_begin = start;
-            local block_end   = start + BLOCK;
-            
-            if (end < block_end) {
-                block_end = end;
-            }
-            
-            data.seek(0);
-            
-            if (start > 0) {
-                write_line(start - 1, WHITE_PIXEL, NORMAL, false);
-                write_line(start - 1, WHITE_PIXEL, NORMAL, false);
-            }
-            
-            while (block_begin < end) {
-                //server.log("block begin = " + block_begin + " block_end = " + block_end);
-                for (local j = block_begin; j < block_end; j++) {
-                    data.seek((j - start) * BYTESPERLINE);
-                    write_line(j, data.readblob(BYTESPERLINE), inverse, false);
-                }
-                
-                block_begin = block_begin + STEP;
-                block_end   = block_end + STEP;
-                
-                if (block_end > end) {
-                    block_end = end;
-                }
-            }
-            
-            if (end < HEIGHT) {
-                write_line(end, WHITE_PIXEL, NORMAL, false);
-                write_line(end, WHITE_PIXEL, NORMAL, false);
-            }
-        }
-    }
-    
-    function frame_stage_2_range(start, end) {
-        clear_cache();
-        
-        for (local i = 0; i < 4; i++) {
-            frame_fixed_timed(BLACK_PIXEL, 196, start, end);
-            frame_fixed_timed(WHITE_PIXEL, 196, start, end);
-        }
-    }
-    
-    function frame_data_13(data, inverse) {
-        clear_cache();
-        
-        for (local i = 0; i < REPEAT; i++) {
-            local block_begin = 0;
-            local block_end   = BLOCK;
-            
-            data.seek(0);
-            
-            while (block_begin < HEIGHT) {
-                for (local j = block_begin; j < block_end; j++) {
-                    data.seek(j * BYTESPERLINE);
-                    write_line(j, data.readblob(BYTESPERLINE), inverse, false);
-                }
-                
-                block_begin = block_begin + STEP;
-                block_end   = block_end + STEP;
-                
-                if (block_end > HEIGHT) {
-                    block_end = HEIGHT;
-                }
-            }
-        }
-    }
-    
-    function junk_line(value, size) {
-        local junk = blob(size);
-        
-        for (local i = 0; i < size; i++) {
-            junk.writen(value, BYTE);
-        }
-        
-        return junk;
-    }
-    
-    function frame_stage_2() {
-        clear_cache();
-        
-        for (local i = 0; i < 4; i++) {
-            frame_fixed_timed(BLACK_PIXEL, 196, 0, HEIGHT);
-            frame_fixed_timed(WHITE_PIXEL, 196, 0, HEIGHT);
-        }
-    }
-    
-    function frame_fixed_timed(data, stage_time, start, end) {
-       while (stage_time > 0) {
-            local start_time = hardware.millis();
-            
-            for (local i = start; i < end; i++) {
-                write_line(i, data, NORMAL, false);
-            }
-            
-            local end_time = hardware.millis();
-            stage_time = stage_time - end_time - start_time;
-        }
-    }
-
-    function getTemp() {
-        return therm.read_c();
-    }
-}
 
 class Thermistor {
         // thermistor constants are shown on your thermistor datasheet
