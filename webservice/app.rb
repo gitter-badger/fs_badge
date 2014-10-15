@@ -78,22 +78,18 @@ class XbmApp < Sinatra::Base
     body = JSON.parse(request.body.read.to_s)
     msg = body['msg'] || 'hello world'
     format = params[:format] || 'epd'
-    text = Magick::Draw.new
 
-    image = Magick::Image.new(WIDTH, HEIGHT) do
+    image = Magick::Image.read("caption:#{msg}") do
       self.colorspace = Magick::GRAYColorspace
       self.image_type = Magick::BilevelType
       self.background_color = 'white'
-      self.antialias = false
-    end
-
-    text.annotate(image, WIDTH, HEIGHT, 0, 0, msg) do
-      self.pointsize = 36
-      self.font = "Helvetica"
-      self.font_weight = Magick::BoldWeight
-      self.gravity = Magick::CenterGravity
       self.fill = 'black'
-    end
+      self.stroke = 'black'
+      self.size = "#{WIDTH}x#{HEIGHT}"
+      self.font = "Helvetica"
+      self.antialias = false
+      self.gravity = Magick::CenterGravity
+    end.first
 
     if format == 'png'
       #Give the user the png version
@@ -111,22 +107,18 @@ class XbmApp < Sinatra::Base
     msg = params[:msg] || 'hello world'
     agent = params[:agent]
     format = params[:format] || 'png'
-    text = Magick::Draw.new
 
-    image = Magick::Image.new(WIDTH, HEIGHT) do
+    image = Magick::Image.read("caption:#{msg}") do
       self.colorspace = Magick::GRAYColorspace
       self.image_type = Magick::BilevelType
       self.background_color = 'white'
-      self.antialias = false
-    end
-
-    text.annotate(image, WIDTH, HEIGHT, 0, 0, msg) do
-      self.pointsize = 36
-      self.font = "Helvetica"
-      self.font_weight = Magick::BoldWeight
-      self.gravity = Magick::CenterGravity
       self.fill = 'black'
-    end
+      self.stroke = 'black'
+      self.size = "#{WIDTH}x#{HEIGHT}"
+      self.font = "Helvetica"
+      self.antialias = false
+      self.gravity = Magick::CenterGravity
+    end.first
 
     send_image(image, agent)
     if format == 'txt'
