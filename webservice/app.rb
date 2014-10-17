@@ -19,6 +19,11 @@ class XbmApp < Sinatra::Base
     'OK'
   end
 
+  post '/tagid/:tagid' do
+    tagid = params[:tagid]
+
+  end
+
   post '/:agent/image.?:format?' do
     agent = params[:agent]
     format = params[:format] || 'png'
