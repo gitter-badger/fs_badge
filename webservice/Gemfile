@@ -8,6 +8,8 @@ gem 'rmagick', '~> 2.13.3', require: 'RMagick'
 gem 'httparty'
 gem 'screencap'
 gem 'newrelic_rpm'
+gem 'redis'
+
 
 # setup our test group and require rspec
 group :test do

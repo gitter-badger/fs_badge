@@ -9,19 +9,44 @@ class XbmApp < Sinatra::Base
   WIDTH  = 264
   HEIGHT = 176
 
+  set :root, File.dirname(__FILE__)
+
   configure :development do
     register Sinatra::Reloader
   end
 
-  set :root, File.dirname(__FILE__)
+  configure do
+    redisUri = ENV["REDIS_URL"] || 'redis://localhost:6379'
+    uri = URI.parse(redisUri)
+    $redis = Redis.new(host: uri.host, port: uri.port, password: uri.password)
+  end
+
+  before do
+    return if ['/epd', '/'].include?(request.path_info)
+    begin
+      busy = $redis.get('epd_busy') || 'false'
+      halt(503) if busy == 'true'
+    rescue Redis::BaseConnectionError => e
+      ::NewRelic::Agent.notice_error(e)
+      halt(500)
+    rescue SocketError => e
+      ::NewRelic::Agent.notice_error(e)
+      halt(500)
+    end
+  end
 
   get '/' do
     'OK'
   end
 
+  post '/epd' do
+    body = JSON.parse(request.body.read.to_s)
+    $redis.set('epd_busy', body['state'])
+  end
+
   post '/tagid/:tagid' do
     tagid = params[:tagid]
-
+    "Got #{tagid}"
   end
 
   post '/:agent/image.?:format?' do

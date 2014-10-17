@@ -17,6 +17,7 @@ GEM
       rack
     rack-test (0.6.2)
       rack (>= 1.0)
+    redis (3.1.0)
     rmagick (2.13.3)
     rspec (3.1.0)
       rspec-core (~> 3.1.0)
@@ -54,6 +55,7 @@ DEPENDENCIES
   httparty
   i18n (~> 0.4.1)
   newrelic_rpm
+  redis
   rmagick (~> 2.13.3)
   rspec
   screencap
